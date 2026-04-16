@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import Image from 'next/image'
 
 interface HeaderProps {
   onSettings: () => void
@@ -21,14 +22,19 @@ export default function Header({
     <header className="header">
       <div className="header-inner">
         {/* Left: Logo */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           {showBack && (
             <Link href={backHref} className="btn btn-ghost btn-icon" title="Volver">
               ←
             </Link>
           )}
           <Link href="/" className="header-logo" style={{ textDecoration: 'none' }}>
-            <div className="header-logo-mark">VP</div>
+            <Image 
+              src="/logo.webp" 
+              alt="Copper Giant" 
+              width={34} 
+              height={34} 
+            />
             <span className="header-logo-name">
               Video<span>Panel</span>
             </span>
@@ -46,7 +52,7 @@ export default function Header({
           <button
             className="btn btn-outline"
             onClick={onSettings}
-            style={{ fontSize: '0.82rem', padding: '7px 14px', gap: '6px' }}
+            style={{ fontSize: '0.85rem', padding: '8px 16px', gap: '6px' }}
           >
             ⚙ Configuración
           </button>
