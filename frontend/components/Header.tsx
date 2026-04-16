@@ -1,7 +1,6 @@
 'use client'
 
 import Link from 'next/link'
-import Image from 'next/image'
 
 interface HeaderProps {
   onSettings: () => void
@@ -29,11 +28,12 @@ export default function Header({
             </Link>
           )}
           <Link href="/" className="header-logo" style={{ textDecoration: 'none' }}>
-            <Image 
+            <img 
               src="/logo.webp" 
               alt="Copper Giant" 
-              width={34} 
-              height={34} 
+              width="34" 
+              height="34" 
+              style={{ borderRadius: 'var(--r-sm)', objectFit: 'cover' }}
             />
             <span className="header-logo-name">
               Video<span>Panel</span>
