@@ -1,0 +1,52 @@
+# ── Node / Next.js ──────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.tsbuildinfo
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+dist/
+*.egg-info/
+
+# ── Data & secrets ───────────────────────────────────────────
+backend/data/
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ── Temp audio files ─────────────────────────────────────────
+/tmp/
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.wav
+
+# ── OS ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Docker volumes (local dev) ───────────────────────────────
+volumes/

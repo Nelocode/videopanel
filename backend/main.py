@@ -1,0 +1,192 @@
+import json
+import uuid
+from typing import Optional, List
+
+from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from database import Database
+from services.ai_service import AIService
+from services.video_service import VideoService
+
+app = FastAPI(title="VideoPanel API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+db = Database()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SettingsIn(BaseModel):
+    gemini_api_key: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    preferred_model: Optional[str] = None
+
+
+@app.get("/api/settings")
+async def get_settings():
+    raw = db.get_settings()
+    result = {
+        "preferred_model": raw.get("preferred_model", "gemini-1.5-flash"),
+        "has_gemini": bool(raw.get("gemini_api_key")),
+        "has_openai": bool(raw.get("openai_api_key")),
+        "preferred_model_options": [
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-2.0-flash",
+        ],
+    }
+    # Show masked keys for display
+    if raw.get("gemini_api_key"):
+        k = raw["gemini_api_key"]
+        result["gemini_api_key_masked"] = k[:8] + "•" * 20 + k[-4:]
+    if raw.get("openai_api_key"):
+        k = raw["openai_api_key"]
+        result["openai_api_key_masked"] = k[:8] + "•" * 20 + k[-4:]
+    return result
+
+
+@app.post("/api/settings")
+async def update_settings(body: SettingsIn):
+    data = {}
+    if body.gemini_api_key:
+        data["gemini_api_key"] = body.gemini_api_key
+    if body.openai_api_key:
+        data["openai_api_key"] = body.openai_api_key
+    if body.preferred_model:
+        data["preferred_model"] = body.preferred_model
+    db.update_settings(data)
+    return {"status": "ok"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Video Analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AnalyzeRequest(BaseModel):
+    video_url: str
+    system_prompt: str
+
+
+@app.post("/api/analyze")
+async def analyze_video(body: AnalyzeRequest, background_tasks: BackgroundTasks):
+    settings = db.get_settings()
+    gemini_key = settings.get("gemini_api_key")
+    if not gemini_key:
+        raise HTTPException(
+            status_code=400,
+            detail="API key de Gemini no configurada. Ve a ⚙ Configuración para agregarla.",
+        )
+
+    if not body.video_url.strip():
+        raise HTTPException(status_code=400, detail="La URL del video es requerida.")
+
+    job_id = str(uuid.uuid4())
+    db.create_job(job_id, body.video_url, body.system_prompt)
+
+    background_tasks.add_task(
+        _process_video,
+        job_id=job_id,
+        url=body.video_url,
+        prompt=body.system_prompt,
+        gemini_key=gemini_key,
+        model_name=settings.get("preferred_model", "gemini-1.5-flash"),
+    )
+
+    return {"job_id": job_id}
+
+
+async def _process_video(
+    job_id: str, url: str, prompt: str, gemini_key: str, model_name: str
+):
+    video_svc = VideoService()
+    audio_path = None
+    try:
+        db.update_job(job_id, "downloading", "⬇ Descargando audio del video...")
+        audio_path = await video_svc.download_audio(url, job_id)
+
+        db.update_job(job_id, "analyzing", "🤖 Analizando con Gemini AI...")
+        ai_svc = AIService(api_key=gemini_key, model_name=model_name)
+        result = await ai_svc.analyze_video(audio_path, prompt)
+
+        db.update_job(job_id, "done", "✅ Análisis completado", result=result)
+
+    except Exception as exc:
+        db.update_job(job_id, "error", f"❌ {str(exc)}")
+    finally:
+        if audio_path:
+            video_svc.cleanup(audio_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Jobs / Sessions
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/jobs/{job_id}")
+async def get_job(job_id: str):
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job no encontrado.")
+    return job
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    return db.list_jobs()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChatRequest(BaseModel):
+    job_id: str
+    message: str
+    history: List[dict] = []
+
+
+@app.post("/api/chat")
+async def chat(body: ChatRequest):
+    job = db.get_job(body.job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Sesión no encontrada.")
+    if job["status"] != "done":
+        raise HTTPException(status_code=400, detail="El análisis aún no está listo.")
+
+    settings = db.get_settings()
+    gemini_key = settings.get("gemini_api_key")
+    if not gemini_key:
+        raise HTTPException(status_code=400, detail="API key no configurada.")
+
+    result_data = job.get("result", {})
+    context = json.dumps(result_data, ensure_ascii=False, indent=2)
+
+    ai_svc = AIService(
+        api_key=gemini_key,
+        model_name=settings.get("preferred_model", "gemini-1.5-flash"),
+    )
+    response_text = await ai_svc.chat(
+        analysis_context=context,
+        message=body.message,
+        history=body.history,
+    )
+    return {"response": response_text}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Health
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "version": "1.0.0"}
