@@ -63,54 +63,87 @@ Tu rol es ayudar al equipo de comunicaciones a:
 Sé conciso, profesional y orientado a resultados. Responde en el mismo idioma que el usuario."""
 
 
+def _friendly_error(exc: Exception) -> str:
+    """Translate a Gemini exception into a user-friendly Spanish message."""
+    msg = str(exc).lower()
+    if "api key not valid" in msg or "invalid" in msg or "malformed" in msg or "api_key" in msg:
+        return "La API Key ingresada no es válida. Verifica que la copiaste completa desde Google AI Studio (aistudio.google.com)."
+    if "quota" in msg or "rate" in msg or "resource exhausted" in msg:
+        return "Has excedido el límite de uso de tu API Key de Gemini. Espera un momento e intenta de nuevo."
+    if "permission" in msg or "forbidden" in msg or "403" in msg:
+        return "Tu API Key no tiene permisos para usar este modelo. Asegúrate de que esté habilitada en Google AI Studio."
+    if "network" in msg or "connection" in msg or "timeout" in msg:
+        return "No se pudo conectar con Google AI. Verifica tu conexión a internet e intenta de nuevo."
+    if "not found" in msg or "404" in msg:
+        return f"El modelo seleccionado no está disponible con tu API Key. Intenta con 'gemini-1.5-flash'."
+    return f"Error de Google AI: {str(exc)[:200]}"
+
+
 class AIService:
     def __init__(self, api_key: str, model_name: str = "gemini-1.5-flash"):
         genai.configure(api_key=api_key)
         self.model_name = model_name
-        self.model = genai.GenerativeModel(model_name)
+        self.api_key = api_key
+
+    @staticmethod
+    def validate_key(api_key: str) -> None:
+        """
+        Validate the API key by making a lightweight call.
+        Raises ValueError with a user-friendly message if invalid.
+        """
+        try:
+            genai.configure(api_key=api_key)
+            # list_models is a cheap, read-only call that will fail if the key is bad
+            models = list(genai.list_models())
+            if not models:
+                raise ValueError("La API Key no retornó ningún modelo disponible.")
+        except Exception as exc:
+            raise ValueError(_friendly_error(exc)) from exc
 
     async def analyze_video(self, audio_path: str, user_prompt: str) -> Dict:
         """Upload audio to Gemini and analyze it."""
         loop = asyncio.get_event_loop()
-
-        # Upload file
-        uploaded = await loop.run_in_executor(
-            None, self._upload_file, audio_path
-        )
-
-        # Wait for file to be active
-        await loop.run_in_executor(None, self._wait_for_file, uploaded)
-
-        # Build final prompt
-        prompt = ANALYSIS_SYSTEM_PROMPT.format(user_prompt=user_prompt)
-
-        # Generate analysis
-        response = await loop.run_in_executor(
-            None, lambda: self.model.generate_content([uploaded, prompt])
-        )
-
-        raw_text = response.text.strip()
-
-        # Clean up markdown code fences if present
-        if raw_text.startswith("```"):
-            raw_text = raw_text.split("```")[1]
-            if raw_text.startswith("json"):
-                raw_text = raw_text[4:]
-            raw_text = raw_text.strip()
+        model = genai.GenerativeModel(self.model_name)
 
         try:
-            result = json.loads(raw_text)
-        except json.JSONDecodeError:
-            # Return a best-effort fallback
-            result = {
-                "title": "Análisis del Video",
-                "duration": "N/A",
-                "summary": raw_text[:2000],
-                "highlights": [],
-                "content_notes": [],
-            }
+            # Upload file
+            uploaded = await loop.run_in_executor(None, self._upload_file, audio_path)
 
-        return result
+            # Wait for file to be active
+            await loop.run_in_executor(None, self._wait_for_file, uploaded)
+
+            # Build final prompt
+            prompt = ANALYSIS_SYSTEM_PROMPT.format(user_prompt=user_prompt)
+
+            # Generate analysis
+            response = await loop.run_in_executor(
+                None, lambda: model.generate_content([uploaded, prompt])
+            )
+
+            raw_text = response.text.strip()
+
+            # Clean up markdown code fences if present
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("```")[1]
+                if raw_text.startswith("json"):
+                    raw_text = raw_text[4:]
+                raw_text = raw_text.strip()
+
+            try:
+                result = json.loads(raw_text)
+            except json.JSONDecodeError:
+                result = {
+                    "title": "Análisis del Video",
+                    "duration": "N/A",
+                    "summary": raw_text[:2000],
+                    "highlights": [],
+                    "content_notes": [],
+                }
+
+            return result
+
+        except Exception as exc:
+            raise RuntimeError(_friendly_error(exc)) from exc
 
     def _upload_file(self, path: str):
         """Synchronous file upload to Gemini File API."""
@@ -121,7 +154,7 @@ class AIService:
         start = time.time()
         while file.state.name == "PROCESSING":
             if time.time() - start > max_wait:
-                raise TimeoutError("El archivo tardó demasiado en procesarse.")
+                raise TimeoutError("El archivo tardó demasiado en procesarse. Intenta con un video más corto.")
             time.sleep(5)
             file = genai.get_file(file.name)
         if file.state.name != "ACTIVE":
@@ -136,20 +169,24 @@ class AIService:
     ) -> str:
         """Continue a chat about the analyzed video."""
         loop = asyncio.get_event_loop()
+        model = genai.GenerativeModel(self.model_name)
 
-        system = CHAT_SYSTEM_PROMPT.format(analysis_context=analysis_context)
+        try:
+            system = CHAT_SYSTEM_PROMPT.format(analysis_context=analysis_context)
 
-        # Build Gemini chat history
-        gemini_history = []
-        if history:
-            for h in history:
-                role = "user" if h.get("role") == "user" else "model"
-                gemini_history.append({"role": role, "parts": [h.get("content", "")]})
+            gemini_history = []
+            if history:
+                for h in history:
+                    role = "user" if h.get("role") == "user" else "model"
+                    gemini_history.append({"role": role, "parts": [h.get("content", "")]})
 
-        chat = self.model.start_chat(history=gemini_history)
+            chat = model.start_chat(history=gemini_history)
 
-        full_message = f"{system}\n\n---\nPregunta del equipo: {message}"
-        response = await loop.run_in_executor(
-            None, lambda: chat.send_message(full_message)
-        )
-        return response.text
+            full_message = f"{system}\n\n---\nPregunta del equipo: {message}"
+            response = await loop.run_in_executor(
+                None, lambda: chat.send_message(full_message)
+            )
+            return response.text
+
+        except Exception as exc:
+            raise RuntimeError(_friendly_error(exc)) from exc

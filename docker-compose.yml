@@ -13,9 +13,6 @@ services:
     environment:
       - DB_PATH=/app/data/videopanel.db
       - TEMP_DIR=/tmp/videopanel
-    networks:
-      - app-net
-    # Backend is NOT exposed publicly — only the frontend talks to it
     expose:
       - "8000"
 
@@ -32,15 +29,14 @@ services:
       - NODE_ENV=production
     depends_on:
       - backend
-    networks:
-      - app-net
+    labels:
+      # Labels that tell EasyPanel/Traefik to route the web traffic here
+      - "traefik.enable=true"
+      - "traefik.http.routers.videopanel-frontend.rule=Host(`${EASYPANEL_DOMAIN:-localhost}`)"
+      - "traefik.http.services.videopanel-frontend.loadbalancer.server.port=3000"
 
 volumes:
   backend-data:
     driver: local
   audio-tmp:
     driver: local
-
-networks:
-  app-net:
-    driver: bridge

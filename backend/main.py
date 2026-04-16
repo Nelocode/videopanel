@@ -1,5 +1,7 @@
+import asyncio
 import json
 import uuid
+import os
 from typing import Optional, List
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -36,10 +38,13 @@ class SettingsIn(BaseModel):
 @app.get("/api/settings")
 async def get_settings():
     raw = db.get_settings()
+    gemini_key = raw.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY", "")
+    openai_key = raw.get("openai_api_key") or os.environ.get("OPENAI_API_KEY", "")
+    
     result = {
         "preferred_model": raw.get("preferred_model", "gemini-1.5-flash"),
-        "has_gemini": bool(raw.get("gemini_api_key")),
-        "has_openai": bool(raw.get("openai_api_key")),
+        "has_gemini": bool(gemini_key),
+        "has_openai": bool(openai_key),
         "preferred_model_options": [
             "gemini-1.5-flash",
             "gemini-1.5-pro",
@@ -47,26 +52,35 @@ async def get_settings():
         ],
     }
     # Show masked keys for display
-    if raw.get("gemini_api_key"):
-        k = raw["gemini_api_key"]
-        result["gemini_api_key_masked"] = k[:8] + "•" * 20 + k[-4:]
-    if raw.get("openai_api_key"):
-        k = raw["openai_api_key"]
-        result["openai_api_key_masked"] = k[:8] + "•" * 20 + k[-4:]
+    if gemini_key:
+        result["gemini_api_key_masked"] = gemini_key[:8] + "•" * 20 + gemini_key[-4:]
+    if openai_key:
+        result["openai_api_key_masked"] = openai_key[:8] + "•" * 20 + openai_key[-4:]
     return result
 
 
 @app.post("/api/settings")
 async def update_settings(body: SettingsIn):
+    # Validate the Gemini key BEFORE saving
+    gemini_key = body.gemini_api_key
+    if gemini_key:
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, AIService.validate_key, gemini_key)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo validar la API Key: {str(exc)}")
+
     data = {}
-    if body.gemini_api_key:
-        data["gemini_api_key"] = body.gemini_api_key
+    if gemini_key:
+        data["gemini_api_key"] = gemini_key
     if body.openai_api_key:
         data["openai_api_key"] = body.openai_api_key
     if body.preferred_model:
         data["preferred_model"] = body.preferred_model
     db.update_settings(data)
-    return {"status": "ok"}
+    return {"status": "ok", "message": "✅ API Key validada y guardada correctamente."}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -81,11 +95,12 @@ class AnalyzeRequest(BaseModel):
 @app.post("/api/analyze")
 async def analyze_video(body: AnalyzeRequest, background_tasks: BackgroundTasks):
     settings = db.get_settings()
-    gemini_key = settings.get("gemini_api_key")
+    gemini_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+    
     if not gemini_key:
         raise HTTPException(
             status_code=400,
-            detail="API key de Gemini no configurada. Ve a ⚙ Configuración para agregarla.",
+            detail="API key de Gemini no configurada. Ve a ⚙ Configuración para agregarla o configúrala en el servidor.",
         )
 
     if not body.video_url.strip():
@@ -164,7 +179,7 @@ async def chat(body: ChatRequest):
         raise HTTPException(status_code=400, detail="El análisis aún no está listo.")
 
     settings = db.get_settings()
-    gemini_key = settings.get("gemini_api_key")
+    gemini_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
     if not gemini_key:
         raise HTTPException(status_code=400, detail="API key no configurada.")
 
