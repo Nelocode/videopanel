@@ -31,9 +31,12 @@ export default function Header({
             <img 
               src="/logo.webp" 
               alt="Copper Giant" 
-              width="34" 
-              height="34" 
-              style={{ borderRadius: 'var(--r-sm)', objectFit: 'cover' }}
+              style={{ 
+                height: '36px', 
+                width: 'auto', 
+                display: 'block',
+                objectFit: 'contain'
+              }}
             />
             <span className="header-logo-name">
               Video<span>Panel</span>
