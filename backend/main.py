@@ -80,7 +80,9 @@ async def update_settings(body: SettingsIn):
     if body.preferred_model:
         data["preferred_model"] = body.preferred_model
     db.update_settings(data)
-    return {"status": "ok", "message": "✅ API Key validada y guardada correctamente."}
+    if gemini_key or body.openai_api_key:
+        return {"status": "ok", "message": "✅ API Key validada y guardada correctamente."}
+    return {"status": "ok", "message": "✅ Configuración guardada correctamente."}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
