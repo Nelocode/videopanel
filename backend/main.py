@@ -72,6 +72,16 @@ async def update_settings(body: SettingsIn):
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"No se pudo validar la API Key: {str(exc)}")
 
+    openai_key = body.openai_api_key
+    if openai_key:
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, AIService.validate_key, openai_key, True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"No se pudo validar la API Key: {str(exc)}")
+
     data = {}
     if gemini_key:
         data["gemini_api_key"] = gemini_key
@@ -98,11 +108,12 @@ class AnalyzeRequest(BaseModel):
 async def analyze_video(body: AnalyzeRequest, background_tasks: BackgroundTasks):
     settings = db.get_settings()
     gemini_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
+    openai_key = settings.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
     
-    if not gemini_key:
+    if not gemini_key and not openai_key:
         raise HTTPException(
             status_code=400,
-            detail="API key de Gemini no configurada. Ve a ⚙ Configuración para agregarla o configúrala en el servidor.",
+            detail="API key no configurada. Ve a ⚙ Configuración para agregarla o configúrala en el servidor.",
         )
 
     if not body.video_url.strip():
@@ -117,6 +128,7 @@ async def analyze_video(body: AnalyzeRequest, background_tasks: BackgroundTasks)
         url=body.video_url,
         prompt=body.system_prompt,
         gemini_key=gemini_key,
+        openai_key=openai_key,
         model_name=settings.get("preferred_model", "gemini-1.5-flash"),
     )
 
@@ -124,7 +136,7 @@ async def analyze_video(body: AnalyzeRequest, background_tasks: BackgroundTasks)
 
 
 async def _process_video(
-    job_id: str, url: str, prompt: str, gemini_key: str, model_name: str
+    job_id: str, url: str, prompt: str, gemini_key: str, openai_key: str, model_name: str
 ):
     video_svc = VideoService()
     audio_path = None
@@ -133,7 +145,7 @@ async def _process_video(
         audio_path = await video_svc.download_audio(url, job_id)
 
         db.update_job(job_id, "analyzing", "🤖 Analizando con Gemini AI...")
-        ai_svc = AIService(api_key=gemini_key, model_name=model_name)
+        ai_svc = AIService(api_key=gemini_key, openai_key=openai_key, model_name=model_name)
         result = await ai_svc.analyze_video(audio_path, prompt)
 
         db.update_job(job_id, "done", "✅ Análisis completado", result=result)
@@ -182,7 +194,9 @@ async def chat(body: ChatRequest):
 
     settings = db.get_settings()
     gemini_key = settings.get("gemini_api_key") or os.environ.get("GEMINI_API_KEY")
-    if not gemini_key:
+    openai_key = settings.get("openai_api_key") or os.environ.get("OPENAI_API_KEY")
+
+    if not gemini_key and not openai_key:
         raise HTTPException(status_code=400, detail="API key no configurada.")
 
     result_data = job.get("result", {})
@@ -190,6 +204,7 @@ async def chat(body: ChatRequest):
 
     ai_svc = AIService(
         api_key=gemini_key,
+        openai_key=openai_key,
         model_name=settings.get("preferred_model", "gemini-1.5-flash"),
     )
     response_text = await ai_svc.chat(
