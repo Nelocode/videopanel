@@ -60,12 +60,21 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
         }),
       })
 
-      const data = await res.json()
+      let data;
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error("Non-JSON response:", text);
+        setValidationState('error');
+        setValidationMsg('El servidor no respondió correctamente.');
+        return;
+      }
 
       if (!res.ok) {
         // The server returned an error with a friendly message
         setValidationState('error')
-        setValidationMsg(data.detail || 'Error desconocido al guardar la configuración.')
+        setValidationMsg(data?.detail || 'Error desconocido al guardar la configuración.')
         return
       }
 
