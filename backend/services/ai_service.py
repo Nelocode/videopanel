@@ -13,10 +13,10 @@ INSTRUCCIONES ESPECIALES DEL EQUIPO:
 
 ---
 
-Tu tarea es analizar el audio de este video y extraer los momentos más importantes según las instrucciones anteriores.
+Tu tarea es analizar el contenido de este video y extraer los momentos más importantes según las instrucciones anteriores.
 
 Para cada momento clave, proporciona:
-- Timestamp aproximado (formato MM:SS)
+- Timestamp aproximado (formato MM:SS) — si no está disponible usa una estimación
 - Cita textual del fragmento más importante
 - Por qué es relevante para las comunicaciones de la empresa
 - Cómo se puede usar este fragmento (LinkedIn, X/Twitter, comunicado de prensa, etc.)
@@ -129,6 +129,32 @@ class AIService:
         except Exception as e:
             raise RuntimeError(f"OpenAI fallback failed: {str(e)}")
 
+    async def analyze_transcript(self, transcript_text: str, user_prompt: str) -> Dict:
+        """Analyze a text transcript directly — no audio upload needed."""
+        loop = asyncio.get_event_loop()
+        prompt = (
+            ANALYSIS_SYSTEM_PROMPT.format(user_prompt=user_prompt)
+            + f"\n\n---\nTRANSCRIPCIÓN DEL VIDEO:\n{transcript_text}"
+        )
+
+        try:
+            if not self.api_key:
+                raise ValueError("No Gemini key")
+            model = genai.GenerativeModel(self.model_name)
+            response = await loop.run_in_executor(
+                None, lambda: model.generate_content(prompt)
+            )
+            raw_text = response.text.strip()
+
+        except Exception as exc:
+            print(f"Gemini failed for transcript, trying OpenAI: {exc}")
+            try:
+                raw_text = self._fallback_to_openai(prompt)
+            except Exception as openai_exc:
+                raise RuntimeError(_friendly_error(openai_exc, "OpenAI")) from openai_exc
+
+        return self._parse_result(raw_text)
+
     async def analyze_video(self, audio_path: str, user_prompt: str) -> Dict:
         """Upload audio to Gemini and analyze it."""
         loop = asyncio.get_event_loop()
@@ -137,34 +163,27 @@ class AIService:
             if not self.api_key:
                 raise ValueError("No Gemini key")
             model = genai.GenerativeModel(self.model_name)
-            # Upload file
             uploaded = await loop.run_in_executor(None, self._upload_file, audio_path)
-
-            # Wait for file to be active
             await loop.run_in_executor(None, self._wait_for_file, uploaded)
 
-            # Build final prompt
             prompt = ANALYSIS_SYSTEM_PROMPT.format(user_prompt=user_prompt)
-
-            # Generate analysis
             response = await loop.run_in_executor(
                 None, lambda: model.generate_content([uploaded, prompt])
             )
-
             raw_text = response.text.strip()
 
         except Exception as exc:
-            print(f"Gemini failed, trying OpenAI fallback: {exc}")
+            print(f"Gemini failed for audio, trying OpenAI: {exc}")
             try:
-                # Note: OpenAI fallback won't be able to read the audio file directly in this simple implementation,
-                # it would just get the prompt. A real implementation would need to send transcript text.
-                # For this demo, we'll just show the fallback mechanism.
-                prompt = ANALYSIS_SYSTEM_PROMPT.format(user_prompt=user_prompt) + "\n\n(Note: Audio file not available for OpenAI fallback)"
+                prompt = ANALYSIS_SYSTEM_PROMPT.format(user_prompt=user_prompt)
                 raw_text = self._fallback_to_openai(prompt)
             except Exception as openai_exc:
-                raise RuntimeError(_friendly_error(openai_exc, 'OpenAI')) from openai_exc
+                raise RuntimeError(_friendly_error(openai_exc, "OpenAI")) from openai_exc
 
-        # Clean up markdown code fences if present
+        return self._parse_result(raw_text)
+
+    def _parse_result(self, raw_text: str) -> Dict:
+        """Parse JSON from AI response, stripping markdown fences if present."""
         if raw_text.startswith("```"):
             raw_text = raw_text.split("```")[1]
             if raw_text.startswith("json\n"):
@@ -172,17 +191,15 @@ class AIService:
             raw_text = raw_text.strip()
 
         try:
-            result = json.loads(raw_text)
+            return json.loads(raw_text)
         except json.JSONDecodeError:
-            result = {
+            return {
                 "title": "Análisis del Video",
                 "duration": "N/A",
                 "summary": raw_text[:2000],
                 "highlights": [],
                 "content_notes": [],
             }
-
-        return result
 
     def _upload_file(self, path: str):
         """Synchronous file upload to Gemini File API."""

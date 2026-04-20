@@ -139,22 +139,28 @@ async def _process_video(
     job_id: str, url: str, prompt: str, gemini_key: str, openai_key: str, model_name: str
 ):
     video_svc = VideoService()
-    audio_path = None
+    cleanup_path = None
     try:
-        db.update_job(job_id, "downloading", "⬇ Descargando audio del video...")
-        audio_path = await video_svc.download_audio(url, job_id)
+        db.update_job(job_id, "downloading", "🔍 Obteniendo contenido del video...")
+        content = await video_svc.get_content(url, job_id)
 
-        db.update_job(job_id, "analyzing", "🤖 Analizando con Gemini AI...")
         ai_svc = AIService(api_key=gemini_key, openai_key=openai_key, model_name=model_name)
-        result = await ai_svc.analyze_video(audio_path, prompt)
+
+        if content["type"] == "transcript":
+            db.update_job(job_id, "analyzing", "🤖 Analizando transcripción con IA...")
+            result = await ai_svc.analyze_transcript(content["content"], prompt)
+        else:
+            cleanup_path = content["content"]
+            db.update_job(job_id, "analyzing", "🤖 Analizando audio con Gemini AI...")
+            result = await ai_svc.analyze_video(content["content"], prompt)
 
         db.update_job(job_id, "done", "✅ Análisis completado", result=result)
 
     except Exception as exc:
         db.update_job(job_id, "error", f"❌ {str(exc)}")
     finally:
-        if audio_path:
-            video_svc.cleanup(audio_path)
+        if cleanup_path:
+            video_svc.cleanup(cleanup_path)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
