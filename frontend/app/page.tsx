@@ -29,11 +29,19 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ video_url: videoUrl.trim(), system_prompt: prompt }),
       })
-      const data = await res.json()
+      let data;
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error("Non-JSON response:", text);
+        setError('El servidor no respondió correctamente.');
+        return;
+      }
 
       if (!res.ok) {
-        setError(data.detail || 'Ocurrió un error inesperado.')
-        return
+        setError(data?.detail || 'Ocurrió un error inesperado.');
+        return;
       }
       router.push(`/process/${data.job_id}`)
     } catch {
