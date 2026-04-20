@@ -17,12 +17,24 @@ def _extract_video_id(url: str) -> str | None:
     return None
 
 
+# yt-dlp player clients to try in order (each bypasses bot detection differently)
+_PLAYER_CLIENTS = [
+    ["android_creator"],
+    ["web_creator"],
+    ["ios"],
+    ["android"],
+    ["mweb"],
+    ["tv_embedded"],
+]
+
+
 class VideoService:
     """
-    Obtiene el contenido de video en dos pasos:
-      1. YouTube Transcript API  — más rápido, sin descarga, sin bot-check.
-      2. yt-dlp (cliente iOS)    — fallback para videos sin subtítulos.
-    Devuelve siempre un dict con:
+    Gets video content in two stages:
+      1. YouTube Transcript API  — fastest, no download, no bot-check.
+      2. yt-dlp (multiple clients) — fallback for videos without captions.
+
+    Always returns:
         {"type": "transcript"|"audio", "content": str|path}
     """
 
@@ -31,7 +43,7 @@ class VideoService:
         os.makedirs(self.temp_dir, exist_ok=True)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Public
+    # Public API
     # ──────────────────────────────────────────────────────────────────────────
 
     async def get_content(self, url: str, job_id: str) -> dict:
@@ -40,20 +52,40 @@ class VideoService:
                or {"type": "audio",      "content": "<mp3 path>"}
         """
         # Step 1: Try transcript (instant, no bot issues)
+        print(f"[VideoService] Trying youtube-transcript-api for: {url}")
         transcript = await self._try_transcript(url)
         if transcript:
+            print(f"[VideoService] Transcript OK ({len(transcript)} chars)")
             return {"type": "transcript", "content": transcript}
 
-        # Step 2: Fallback — download audio with iOS player client
-        audio_path = await self._download_audio_ios(url, job_id)
-        return {"type": "audio", "content": audio_path}
+        print("[VideoService] No transcript available. Trying yt-dlp fallback...")
 
-    # keep backward compat for anything that still calls download_audio
+        # Step 2: Fallback — try multiple yt-dlp player clients
+        last_error = None
+        for client in _PLAYER_CLIENTS:
+            try:
+                print(f"[VideoService] Trying yt-dlp player_client={client}")
+                audio_path = await self._download_with_client(url, job_id, client)
+                print(f"[VideoService] yt-dlp success with client={client}")
+                return {"type": "audio", "content": audio_path}
+            except Exception as e:
+                print(f"[VideoService] Client {client} failed: {e}")
+                last_error = e
+                # Clean up partial files before next attempt
+                self._cleanup_partial(job_id)
+                continue
+
+        raise RuntimeError(
+            "No se pudo obtener el contenido del video. "
+            "Verifica que la URL sea válida y que el video sea público. "
+            f"Último error: {last_error}"
+        )
+
+    # backward compat
     async def download_audio(self, url: str, job_id: str) -> str:
         result = await self.get_content(url, job_id)
         if result["type"] == "audio":
             return result["content"]
-        # If we only have a transcript, write it to a temp .txt so callers don't break
         txt_path = os.path.join(self.temp_dir, f"{job_id}_transcript.txt")
         with open(txt_path, "w", encoding="utf-8") as f:
             f.write(result["content"])
@@ -67,45 +99,77 @@ class VideoService:
         loop = asyncio.get_event_loop()
         try:
             return await loop.run_in_executor(None, self._fetch_transcript_sync, url)
-        except Exception:
+        except Exception as e:
+            print(f"[VideoService] Transcript exception: {e}")
             return None
 
     def _fetch_transcript_sync(self, url: str) -> str | None:
-        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
-
         video_id = _extract_video_id(url)
         if not video_id:
+            print("[VideoService] Could not extract video ID from URL")
             return None
 
-        # Preferred languages: Spanish first, then English, then any
-        preferred = ["es", "es-419", "es-ES", "en", "en-US", "en-GB"]
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            from youtube_transcript_api import YouTubeTranscriptApi
+        except ImportError:
+            print("[VideoService] youtube-transcript-api not installed, skipping")
+            return None
 
-            # Try preferred languages first
+        preferred = ["es", "es-419", "es-ES", "en", "en-US", "en-GB"]
+
+        try:
+            # --- Try new instance-based API (>=0.7.0) ---
+            try:
+                api = YouTubeTranscriptApi()
+                transcript_list = api.list(video_id)
+                transcripts = list(transcript_list)
+                print(f"[VideoService] Found {len(transcripts)} transcripts (new API)")
+
+                # Try preferred languages first, then any
+                for lang in preferred:
+                    for t in transcripts:
+                        lang_code = getattr(t, "language_code", "")
+                        if lang_code.startswith(lang.split("-")[0]):
+                            return self._segments_to_text(t.fetch())
+
+                if transcripts:
+                    return self._segments_to_text(transcripts[0].fetch())
+
+            except AttributeError:
+                pass  # old API, try below
+
+            # --- Try old static API (<0.7.0) ---
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             for lang in preferred:
                 try:
                     t = transcript_list.find_transcript([lang])
-                    segments = t.fetch()
-                    return " ".join(s["text"] for s in segments).strip()
+                    return self._segments_to_text(t.fetch())
                 except Exception:
                     continue
 
-            # Accept any available transcript (including auto-generated)
+            # Any transcript
             for t in transcript_list:
-                segments = t.fetch()
-                return " ".join(s["text"] for s in segments).strip()
+                return self._segments_to_text(t.fetch())
 
-        except (NoTranscriptFound, TranscriptsDisabled):
-            return None
-        except Exception:
+        except Exception as e:
+            print(f"[VideoService] No transcript for {video_id}: {e}")
             return None
 
+    def _segments_to_text(self, segments) -> str:
+        """Convert transcript segments (dicts or objects) to plain text."""
+        texts = []
+        for s in segments:
+            if isinstance(s, dict):
+                texts.append(s.get("text", ""))
+            else:
+                texts.append(getattr(s, "text", str(s)))
+        return " ".join(texts).strip()
+
     # ──────────────────────────────────────────────────────────────────────────
-    # Step 2 — yt-dlp with iOS player client (bypasses bot detection)
+    # Step 2 — yt-dlp with rotating player clients
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def _download_audio_ios(self, url: str, job_id: str) -> str:
+    async def _download_with_client(self, url: str, job_id: str, player_client: list) -> str:
         output_template = os.path.join(self.temp_dir, f"{job_id}.%(ext)s")
 
         ydl_opts = {
@@ -121,21 +185,25 @@ class VideoService:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            # iOS player client bypasses bot detection without cookies
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios"],
+                    "player_client": player_client,
                 }
             },
             "http_headers": {
-                "User-Agent": "com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X;)"
+                "User-Agent": (
+                    "Mozilla/5.0 (Linux; Android 12; Pixel 6) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Mobile Safari/537.36"
+                )
             },
         }
 
-        # Optionally use cookies file from env (admin-level config, not per-user)
+        # Optional admin-level cookies (not required per-user)
         cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE")
         if cookies_file and os.path.exists(cookies_file):
             ydl_opts["cookiefile"] = cookies_file
+            print(f"[VideoService] Using cookies file: {cookies_file}")
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._do_download, url, ydl_opts)
@@ -145,13 +213,10 @@ class VideoService:
             return mp3_path
 
         for f in os.listdir(self.temp_dir):
-            if f.startswith(job_id):
+            if f.startswith(job_id) and not f.endswith("_transcript.txt"):
                 return os.path.join(self.temp_dir, f)
 
-        raise RuntimeError(
-            "No se pudo obtener el audio del video. "
-            "Verifica que la URL sea válida y que el video sea público."
-        )
+        raise RuntimeError("Audio file not found after download.")
 
     def _do_download(self, url: str, opts: dict):
         import yt_dlp
@@ -161,6 +226,17 @@ class VideoService:
     # ──────────────────────────────────────────────────────────────────────────
     # Cleanup
     # ──────────────────────────────────────────────────────────────────────────
+
+    def _cleanup_partial(self, job_id: str):
+        """Remove any partial files from a failed attempt."""
+        try:
+            for f in os.listdir(self.temp_dir):
+                if f.startswith(job_id):
+                    full = os.path.join(self.temp_dir, f)
+                    if os.path.exists(full):
+                        os.remove(full)
+        except Exception:
+            pass
 
     def cleanup(self, *paths: str):
         for path in paths:
