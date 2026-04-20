@@ -28,7 +28,15 @@ class VideoService:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
         }
+
+        # Handle YouTube anti-bot by passing cookies if provided
+        cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE")
+        if cookies_file and os.path.exists(cookies_file):
+            ydl_opts["cookiefile"] = cookies_file
 
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._do_download, url, ydl_opts)
