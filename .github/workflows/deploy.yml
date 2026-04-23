@@ -1,0 +1,24 @@
+name: Deploy to Easypanel
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Frontend Webhook
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: 'http://147.93.113.16:3000/api/deploy/21a3e5140bf783b1fd398927d749277d7d4a44e31fef382b'
+          method: 'POST'
+          timeout: 10000
+
+      - name: Trigger Backend Webhook
+        uses: fjogeleit/http-request-action@v1
+        with:
+          url: 'http://147.93.113.16:3000/api/deploy/63734e7fe984cf97a63a3739fb2452ad6cf275267bc60444'
+          method: 'POST'
+          timeout: 10000
